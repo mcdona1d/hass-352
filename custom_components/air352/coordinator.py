@@ -50,9 +50,12 @@ class Air352Coordinator(DataUpdateCoordinator):
         data = {}
         for dev, result in zip(self.devices, results):
             iot_id = dev["iotId"]
+            if isinstance(result, Air352AuthError):
+                raise ConfigEntryAuthFailed(str(result)) from result
             if isinstance(result, Exception):
                 _LOGGER.warning("Failed to get properties for %s: %s", iot_id, result)
-                data[iot_id] = {}
             else:
                 data[iot_id] = result
+        if self.devices and not data:
+            raise UpdateFailed("Could not read properties from any 352 device")
         return data

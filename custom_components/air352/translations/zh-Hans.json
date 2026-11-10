@@ -18,8 +18,12 @@
     },
     "error": {
       "cannot_connect": "无法连接到 352 服务器",
-      "invalid_auth": "手机号或密码错误",
-      "unknown": "未知错误"
+      "invalid_auth": "352 登录或阿里云认证失败，请检查账号密码并查看日志",
+      "unknown": "未知错误",
+      "dns_error": "无法解析 352 或阿里云服务器域名，请检查 Home Assistant 主机的 DNS 设置",
+      "ssl_error": "无法验证服务器证书，请检查系统时间、代理和证书设置",
+      "timeout": "连接 352 或阿里云服务器超时，请检查网络后重试",
+      "server_error": "352 或阿里云接口返回异常，请查看日志中的具体认证步骤"
     },
     "abort": {
       "already_configured": "该账号已配置",
@@ -34,6 +38,14 @@
       "co2": { "name": "二氧化碳" },
       "currenttemperature": { "name": "温度" },
       "relativehumidity": { "name": "湿度" },
+      "waterusageduration": { "name": "补水后已用时长" },
+      "watershortage": {
+        "name": "水箱状态",
+        "state": {
+          "normal": "正常",
+          "water_shortage": "缺水"
+        }
+      },
       "filterlifetimepercent_1": { "name": "滤芯1寿命" },
       "filterlifetimepercent_2": { "name": "滤芯2寿命" },
       "filterlifetimepercent_3": { "name": "滤芯3寿命" },
@@ -41,7 +53,20 @@
       "rawwatertds": { "name": "进水TDS" },
       "watertemperature": { "name": "水温" },
       "totalpurewater": { "name": "累计净水量" },
-      "wifi_rssi": { "name": "WiFi信号" }
+      "wifi_rssi": { "name": "WiFi信号" },
+      "sethumidity": { "name": "目标湿度" },
+      "workmode": {
+        "name": "工作模式",
+        "state": {
+          "standby": "待机",
+          "auto": "自动",
+          "moisturizing": "保湿",
+          "sleep": "睡眠",
+          "humidity": "湿度模式",
+          "wind": "风量模式"
+        }
+      },
+      "deviceusedtime": { "name": "累计运行时间" }
     },
     "fan": {
       "air_purifier": {
@@ -61,7 +86,8 @@
       "childlockswitch": { "name": "童锁" },
       "screenswitch": { "name": "屏幕" },
       "ionsswitch": { "name": "负离子" },
-      "smartmodeswitch": { "name": "智能模式" }
+      "smartmodeswitch": { "name": "智能模式" },
+      "airdringmode": { "name": "风干设置" }
     }
   }
 }

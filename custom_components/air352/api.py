@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import base64
@@ -24,13 +25,26 @@ class Air352AuthError(Exception):
 
 
 class Air352ConnectionError(Exception):
-    pass
+    def __init__(self, message: str, *, reason: str = "cannot_connect"):
+        self.reason = reason
+        super().__init__(message)
 
 
 class Air352ApiError(Exception):
     def __init__(self, code: int, message: str):
         self.code = code
         super().__init__(message)
+
+
+def create_client_session() -> aiohttp.ClientSession:
+    """Use the system resolver, including when HA has aiodns installed.
+
+    AsyncResolver queries DNS servers itself and can time out in HA networks
+    where the system resolver still works. ThreadedResolver runs getaddrinfo
+    off the event loop. The caller owns and must close this session.
+    """
+    connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+    return aiohttp.ClientSession(connector=connector)
 
 
 class Air352ApiClient:
@@ -42,9 +56,87 @@ class Air352ApiClient:
         self._access_token: str | None = None
         self._iot_token: str | None = None
         self._iot_refresh_token: str | None = None
+        self._oauth_sid: str | None = None
         self._iot_token_ts: float = 0
         self._iot_token_expire: int = 0
+        self._auth_lock = asyncio.Lock()
+        self._ali_domain = ALI_DOMAIN
+        self._oa_domain = ALI_OA_DOMAIN
         self.devices: list[dict] = []
+
+    async def async_close(self) -> None:
+        """Close the session owned by the integration."""
+        await self._session.close()
+
+    def _safe_message(self, message: object) -> str:
+        text = str(message or "unknown error")
+        for secret in (self._username, self._password, self._access_token,
+                       self._iot_token, self._iot_refresh_token, self._oauth_sid):
+            if secret:
+                text = text.replace(secret, "[redacted]")
+        return text[:300]
+
+    async def _request_json(self, method: str, url: str, *, stage: str, **kwargs) -> dict:
+        """Translate transport failures without logging credentials or bodies."""
+        _LOGGER.debug("352 request: %s", stage)
+        try:
+            async with self._session.request(
+                method, url, timeout=aiohttp.ClientTimeout(total=20),
+                allow_redirects=False, **kwargs,
+            ) as resp:
+                raw = await resp.read()
+                if resp.status >= 300:
+                    raise Air352ConnectionError(f"{stage}: HTTP {resp.status}")
+                if raw[:2] == b"\x1f\x8b":
+                    raw = gzip_decompress(raw)
+                try:
+                    data = json.loads(raw)
+                except (ValueError, UnicodeError) as exc:
+                    raise Air352ApiError(-1, f"{stage}: empty or non-JSON response") from exc
+                if not isinstance(data, dict):
+                    raise Air352ApiError(-1, f"{stage}: expected a JSON object")
+                return data
+        except aiohttp.ClientConnectorDNSError as exc:
+            raise Air352ConnectionError(
+                f"{stage}: DNS resolution failed for {exc.host}; check the HA host DNS",
+                reason="dns_error",
+            ) from exc
+        except aiohttp.ClientSSLError as exc:
+            raise Air352ConnectionError(
+                f"{stage}: TLS certificate verification failed", reason="ssl_error",
+            ) from exc
+        except (TimeoutError, aiohttp.ServerTimeoutError) as exc:
+            raise Air352ConnectionError(f"{stage}: request timed out", reason="timeout") from exc
+        except (aiohttp.ClientError, OSError) as exc:
+            raise Air352ConnectionError(f"{stage}: connection failed ({type(exc).__name__})") from exc
+
+    @staticmethod
+    def _code(data: dict) -> int:
+        try:
+            return int(data.get("code", -1))
+        except (ValueError, TypeError):
+            return -1
+
+    @staticmethod
+    def _required_data(data: dict, stage: str) -> dict:
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            raise Air352ApiError(-1, f"{stage}: missing data object")
+        return payload
+
+    @staticmethod
+    def _endpoint(value: object, default: str) -> str:
+        """Accept only Alibaba HTTPS hosts from region discovery."""
+        if value is None:
+            return default
+        if not isinstance(value, str):
+            raise Air352ApiError(-1, "region: invalid endpoint")
+        host = value.removeprefix("https://").rstrip("/")
+        if not host.endswith((".aliyuncs.com", ".aliyun.com", ".aliplus.com")) or any(
+            char not in "abcdefghijklmnopqrstuvwxyz0123456789.-" for char in host
+        ):
+            raise Air352ApiError(-1, "region: invalid endpoint")
+        return host
 
     # ── 352 API helpers ──
 
@@ -64,10 +156,9 @@ class Air352ApiClient:
     async def _352_request(self, method: str, path: str, json_data: dict | None = None) -> dict:
         url = BASE_URL_352 + path
         headers = self._352_headers(path, self._access_token or "")
-        async with self._session.request(method, url, headers=headers, json=json_data, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            data = await resp.json()
-        if data.get("code") not in (0, 200):
-            raise Air352ApiError(data.get("code", -1), data.get("message", "unknown"))
+        data = await self._request_json(method, url, stage=f"352 {path}", headers=headers, json=json_data)
+        if self._code(data) not in (0, 200):
+            raise Air352ApiError(self._code(data), f"352 {path}: {self._safe_message(data.get('message'))}")
         return data
 
     # ── Alibaba IoT API Gateway helpers ──
@@ -110,24 +201,25 @@ class Air352ApiClient:
 
     async def _ali_gw_request(self, path: str, params: dict, api_ver: str = "1.0.2", iot_token: str | None = None, _retried: bool = False) -> dict:
         headers, body = self._ali_gw_sign("POST", path, params, api_ver, iot_token)
-        url = f"https://{ALI_DOMAIN}{path}"
-        async with self._session.post(url, headers=headers, data=body, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            raw = await resp.read()
-            if raw[:2] == b"\x1f\x8b":
-                raw = gzip_decompress(raw)
-            data = json.loads(raw)
-        code = data.get("code", -1)
+        url = f"https://{self._ali_domain}{path}"
+        data = await self._request_json("POST", url, stage=f"Alibaba {path}", headers=headers, data=body)
+        code = self._code(data)
         if code in (200,):
             return data
-        msg = data.get("message", data.get("localizedMsg", "unknown"))
+        msg = self._safe_message(data.get("message") or data.get("localizedMsg"))
         if code in self._ALI_AUTH_ERROR_CODES or "identity" in msg.lower() or "token" in msg.lower() or "session" in msg.lower():
-            if not _retried:
-                _LOGGER.info("IoT token invalid (%s: %s), re-authenticating", code, msg)
-                self._iot_token = None
-                await self.authenticate()
+            # Authentication endpoints have no IoT token yet. Retrying those by
+            # calling authenticate() used to recurse until the request failed.
+            if iot_token and not _retried:
+                _LOGGER.info("IoT token invalid (code %s), re-authenticating", code)
+                async with self._auth_lock:
+                    if self._iot_token == iot_token:
+                        self._iot_token = None
+                    if not self.is_iot_token_valid():
+                        await self._authenticate()
                 return await self._ali_gw_request(path, params, api_ver, self._iot_token, _retried=True)
-            raise Air352AuthError(f"Auth failed after retry: {code} {msg}")
-        raise Air352ApiError(code, msg)
+            raise Air352AuthError(f"Alibaba {path}: code {code}: {msg}")
+        raise Air352ApiError(code, f"Alibaba {path}: code {code}: {msg}")
 
     async def _ali_oa_login(self, access_token: str) -> str:
         """Call loginbyoauth on living-account endpoint, return sid."""
@@ -173,42 +265,54 @@ class Air352ApiClient:
             "date": date_str, "Accept-Encoding": "gzip",
         }
 
-        url = f"https://{ALI_OA_DOMAIN}{path}"
-        async with self._session.post(url, headers=headers, data=body_bytes, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            raw = await resp.read()
-            if raw[:2] == b"\x1f\x8b":
-                raw = gzip_decompress(raw)
-            data = json.loads(raw)
+        url = f"https://{self._oa_domain}{path}"
+        data = await self._request_json("POST", url, stage="Alibaba OAuth login", headers=headers, data=body_bytes)
 
         try:
-            return data["data"]["data"]["loginSuccessResult"]["sid"]
+            sid = data["data"]["data"]["loginSuccessResult"]["sid"]
         except (KeyError, TypeError) as e:
-            raise Air352AuthError(f"loginbyoauth failed: {data}") from e
+            raise Air352AuthError(f"Alibaba OAuth login failed (code {self._code(data)})") from e
+        if not isinstance(sid, str) or not sid:
+            raise Air352AuthError("Alibaba OAuth login: missing sid")
+        return sid
 
     # ── Public API ──
 
     async def authenticate(self) -> None:
         """Full auth: 352 login → region → OA login → IoT session."""
+        async with self._auth_lock:
+            await self._authenticate()
+
+    async def _authenticate(self) -> None:
+        self._iot_token = None
+        self._ali_domain = ALI_DOMAIN
+        self._oa_domain = ALI_OA_DOMAIN
         # Step 1: 352 login
         login_path = "/api/v1/enduser/login"
         headers = self._352_headers(login_path)
         url = BASE_URL_352 + login_path
-        async with self._session.post(url, headers=headers,
-                json={"account": self._username, "password": self._password},
-                timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            data = await resp.json()
-        if data.get("code") not in (0, 200):
-            raise Air352AuthError(data.get("message", "login failed"))
-        self._access_token = data["data"]["access_token"]
+        data = await self._request_json(
+            "POST", url, stage="352 login", headers=headers,
+            json={"account": self._username, "password": self._password},
+        )
+        if self._code(data) not in (0, 200):
+            raise Air352AuthError(f"352 login: code {self._code(data)}: {self._safe_message(data.get('message'))}")
+        self._access_token = self._required_data(data, "352 login").get("access_token")
+        if not isinstance(self._access_token, str) or not self._access_token:
+            raise Air352ApiError(-1, "352 login: missing access_token")
 
         # Step 2: region get
-        await self._ali_gw_request(
+        region = await self._ali_gw_request(
             "/living/account/region/get",
             {"type": "THIRD_AUTHCODE", "countryCode": "CN", "authCode": self._access_token},
         )
+        endpoints = self._required_data(region, "region")
+        self._ali_domain = self._endpoint(endpoints.get("apiGatewayEndpoint"), ALI_DOMAIN)
+        self._oa_domain = self._endpoint(endpoints.get("oaApiGatewayEndpoint"), ALI_OA_DOMAIN)
 
         # Step 3: OA login
         sid = await self._ali_oa_login(self._access_token)
+        self._oauth_sid = sid
 
         # Step 4: create IoT session
         r = await self._ali_gw_request(
@@ -216,9 +320,19 @@ class Air352ApiClient:
             {"request": {"authCode": sid, "accountType": "OA_SESSION", "appKey": ALI_APP_KEY}},
             api_ver="1.0.4",
         )
-        self._iot_token = r["data"]["iotToken"]
-        self._iot_refresh_token = r["data"]["refreshToken"]
-        self._iot_token_expire = r["data"].get("iotTokenExpire", 72000)
+        payload = self._required_data(r, "IoT session")
+        token = payload.get("iotToken")
+        if not isinstance(token, str) or not token:
+            raise Air352ApiError(-1, "IoT session: missing iotToken")
+        try:
+            expire = int(payload.get("iotTokenExpire", 72000))
+            if expire <= 0:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise Air352ApiError(-1, "IoT session: invalid token lifetime") from exc
+        self._iot_token = token
+        self._iot_refresh_token = payload.get("refreshToken")
+        self._iot_token_expire = expire
         self._iot_token_ts = time.time()
         _LOGGER.debug("IoT auth complete, token expires in %ds", self._iot_token_expire)
 
@@ -226,11 +340,12 @@ class Air352ApiClient:
         if not self._iot_token:
             return False
         elapsed = time.time() - self._iot_token_ts
-        return elapsed < (self._iot_token_expire - 3600)
+        return elapsed < (self._iot_token_expire - min(3600, self._iot_token_expire * 0.1))
 
     async def ensure_authenticated(self) -> None:
-        if not self.is_iot_token_valid():
-            await self.authenticate()
+        async with self._auth_lock:
+            if not self.is_iot_token_valid():
+                await self._authenticate()
 
     async def get_device_list(self) -> list[dict]:
         await self.ensure_authenticated()
@@ -239,7 +354,11 @@ class Air352ApiClient:
             {"pageNo": 1, "pageSize": 50},
             iot_token=self._iot_token,
         )
-        self.devices = r.get("data", {}).get("data", [])
+        self.devices = self._required_data(r, "device list").get("data")
+        if not isinstance(self.devices, list) or any(
+            not isinstance(device, dict) or not device.get("iotId") for device in self.devices
+        ):
+            raise Air352ApiError(-1, "device list: missing or invalid devices")
         return self.devices
 
     async def get_device_properties(self, iot_id: str) -> dict:
@@ -249,7 +368,7 @@ class Air352ApiClient:
             {"iotId": iot_id},
             iot_token=self._iot_token,
         )
-        return r.get("data", {})
+        return self._required_data(r, "device properties")
 
     async def set_device_properties(self, iot_id: str, items: dict) -> None:
         await self.ensure_authenticated()

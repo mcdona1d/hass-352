@@ -44,6 +44,11 @@ SWITCH_DESCRIPTIONS: list[Air352SwitchDescription] = [
         icon="mdi:brain",
         category_keys=(DEVICE_TYPE_HUMIDIFIER,),
     ),
+    Air352SwitchDescription(
+        key="AirDringMode",
+        icon="mdi:weather-windy",
+        category_keys=(DEVICE_TYPE_HUMIDIFIER,),
+    ),
 ]
 
 
@@ -82,12 +87,14 @@ class Air352Switch(CoordinatorEntity[Air352Coordinator], SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        props = self.coordinator.data.get(self._iot_id, {})
+        props = (self.coordinator.data or {}).get(self._iot_id, {})
         prop = props.get(self.entity_description.key)
         if prop is None:
             return None
         val = prop.get("value") if isinstance(prop, dict) else prop
-        return bool(val)
+        if isinstance(val, (bool, int, float)) and val in (0, 1):
+            return bool(val)
+        return None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.coordinator.api.set_device_properties(self._iot_id, {self.entity_description.key: 1})
@@ -108,4 +115,4 @@ class Air352Switch(CoordinatorEntity[Air352Coordinator], SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self._iot_id in (self.coordinator.data or {})
+        return super().available and self._iot_id in (self.coordinator.data or {})

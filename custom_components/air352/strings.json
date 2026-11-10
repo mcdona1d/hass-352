@@ -18,12 +18,52 @@
     },
     "error": {
       "cannot_connect": "Unable to connect to 352 Air servers",
-      "invalid_auth": "Invalid phone number or password",
-      "unknown": "Unknown error occurred"
+      "invalid_auth": "352 login or Alibaba Cloud authentication failed. Check your credentials and the logs.",
+      "unknown": "Unknown error occurred",
+      "dns_error": "DNS lookup failed for 352 or Alibaba Cloud. Check the Home Assistant host DNS settings.",
+      "ssl_error": "Server certificate verification failed. Check the system clock, proxy and certificates.",
+      "timeout": "The 352 or Alibaba Cloud request timed out. Check your network and retry.",
+      "server_error": "352 or Alibaba Cloud returned an unexpected response. Check the logs for the failing step."
     },
     "abort": {
       "already_configured": "This account is already configured",
       "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "waterusageduration": {
+        "name": "Time Since Refill"
+      },
+      "watershortage": {
+        "name": "Water Tank Status",
+        "state": {
+          "normal": "Normal",
+          "water_shortage": "Water shortage"
+        }
+      },
+      "sethumidity": {
+        "name": "Target Humidity"
+      },
+      "workmode": {
+        "name": "Work Mode",
+        "state": {
+          "standby": "Standby",
+          "auto": "Auto",
+          "moisturizing": "Moisturizing",
+          "sleep": "Sleep",
+          "humidity": "Humidity",
+          "wind": "Wind"
+        }
+      },
+      "deviceusedtime": {
+        "name": "Total Runtime"
+      }
+    },
+    "switch": {
+      "airdringmode": {
+        "name": "Air Drying"
+      }
     }
   }
 }
