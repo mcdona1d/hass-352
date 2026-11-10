@@ -26,16 +26,52 @@ Wi-Fi 信号使用设备的 `WiFI_RSSI` 原始负值，以 dBm 显示，越接�
 
 ## 安装
 
-### HACS（推荐）
+### HACS / Marketplace（推荐）
 
-1. HACS → 集成 → 右上角三点 → 自定义仓库
-2. 输入仓库地址 `https://github.com/mcdona1d/hass-352`，类别选 "集成"
+1. 打开 HACS / Marketplace → 右上角三点 → 自定义仓库（旧版 HACS 先进入“集成”）
+2. 输入仓库地址 `https://github.com/mcdona1d/hass-352`，类别选“集成”（如界面要求选择）
 3. 搜索 "352 Air" 安装
 4. 重启 Home Assistant
+5. 在“设置 → 设备与服务 → 添加集成”中搜索 "352 Air"，完成账号配置
+
+若提示 `has no hacs.json in its root`，请确认 GitHub 默认分支根目录已包含本项目的 `hacs.json`。Marketplace 会读取所安装版本的该文件，因此使用 GitHub Releases 时，所选 Release 对应的标签中也必须包含它；旧版 Release 不会随默认分支更新而改变。维护者发布包含修复的新 Release 后，再刷新并重试；支持选择默认分支的 HACS 版本也可先安装已包含修复的默认分支。
 
 ### 手动安装
 
 将 `custom_components/air352` 目录复制到 Home Assistant 的 `config/custom_components/` 下，重启 HA。
+
+## 项目结构
+
+采用 [HACS 标准集成目录结构](https://hacs.netlify.app/docs/publish/integration/)，一个仓库只提供一个集成：
+
+```text
+.
+├── hacs.json                     # HACS / Marketplace 仓库元数据，必须位于根目录
+├── README.md                     # 使用、安装和开发说明
+├── custom_components/
+│   └── air352/                   # 实际安装到 HA 的完整集成
+│       ├── manifest.json         # HA 集成元数据和版本号
+│       ├── __init__.py           # 集成入口
+│       ├── api.py                # 352 / 阿里云 API 客户端
+│       ├── config_flow.py        # 账号配置流程
+│       ├── const.py              # 常量
+│       ├── coordinator.py        # 状态轮询
+│       ├── fan.py                # 风扇实体
+│       ├── sensor.py             # 传感器实体
+│       ├── switch.py             # 开关实体
+│       ├── water_usage.py        # 补水计时逻辑
+│       ├── strings.json          # 界面字符串
+│       └── translations/         # 中英文翻译
+├── docs/                         # 调研文档
+├── scripts/                      # 本地诊断工具
+├── tests/                        # 离线回归测试
+├── pytest.ini                    # 测试配置
+└── requirements-dev.txt          # 本地开发依赖
+```
+
+`hacs.json` 的 `content_in_root` 为 `false`，安装内容来自 `custom_components/air352/`。诊断脚本、测试、调研文档和本地账号文件均不属于集成运行文件，无需复制到 HA。
+
+发布时需将根目录 `hacs.json` 和集成目录一起提交到 GitHub 默认分支。如果使用 GitHub Releases，应从包含这些文件的提交创建新标签和 Release，并保持标签版本与 `manifest.json` 的 `version` 一致。当前使用仓库源码安装方式，无需上传 `dist/` 内的 ZIP，也无需设置 `zip_release`。
 
 ## 配置
 
